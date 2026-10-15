@@ -1,23 +1,38 @@
 import Cocoa
 
+/// Accessory apps have no Edit menu, so windows wire up the standard text shortcuts by hand.
+@MainActor
+func sendStandardEditAction(for event: NSEvent) -> Bool {
+    guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else { return false }
+    let action: Selector? = switch event.charactersIgnoringModifiers {
+    case "v": #selector(NSText.paste(_:))
+    case "c": #selector(NSText.copy(_:))
+    case "x": #selector(NSText.cut(_:))
+    case "a": #selector(NSText.selectAll(_:))
+    case "z": Selector(("undo:"))
+    default: nil
+    }
+    guard let action else { return false }
+    return NSApp.sendAction(action, to: nil, from: nil)
+}
+
 final class LauncherPanel: NSPanel {
+    /// While true (the Settings preview), any click just drags the panel; nothing inside reacts.
+    var dragsOnMouseDown = false
+
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
 
-    /// Accessory apps have no Edit menu, so wire up the standard text shortcuts by hand.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command {
-            let action: Selector? = switch event.charactersIgnoringModifiers {
-            case "v": #selector(NSText.paste(_:))
-            case "c": #selector(NSText.copy(_:))
-            case "x": #selector(NSText.cut(_:))
-            case "a": #selector(NSText.selectAll(_:))
-            case "z": Selector(("undo:"))
-            default: nil
-            }
-            if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
+        sendStandardEditAction(for: event) || super.performKeyEquivalent(with: event)
+    }
+
+    override func sendEvent(_ event: NSEvent) {
+        if dragsOnMouseDown, event.type == .leftMouseDown {
+            performDrag(with: event)
+            return
         }
-        return super.performKeyEquivalent(with: event)
+        super.sendEvent(event)
     }
 }
 
@@ -40,26 +55,28 @@ final class ResultRow: FlippedView {
         }
     }
 
-    private static let highlight = NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor.white.withAlphaComponent(0.16)
-            : NSColor.black.withAlphaComponent(0.07)
-    }
+    private var highlight = Appearance.selection
 
     override init(frame: NSRect) {
         super.init(frame: frame)
         icon.imageScaling = .scaleProportionallyUpOrDown
         label.font = .systemFont(ofSize: 15, weight: .medium)
-        label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         hint.font = .systemFont(ofSize: 13, weight: .semibold)
-        hint.textColor = .tertiaryLabelColor
         hint.alignment = .right
         hint.isHidden = true
         [icon, label, hint].forEach(addSubview)
+        applyAppearance()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    func applyAppearance() {
+        label.textColor = Appearance.text
+        hint.textColor = Appearance.tertiaryText
+        highlight = Appearance.selection
+        needsDisplay = true
+    }
 
     override func layout() {
         super.layout()
@@ -71,7 +88,7 @@ final class ResultRow: FlippedView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard isSelected else { return }
-        Self.highlight.setFill()
+        highlight.setFill()
         NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12).fill()
     }
 
@@ -100,24 +117,26 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         static let maxRows = 6
     }
 
-    /// Clear glass refracts the most; a light smoke tint keeps it visible over white pages.
-    /// Tweak without rebuilding: `defaults write local.glasslight GlassTint -float 0.3` (0–1)
-    /// and `defaults write local.glasslight GlassLensing -int 2` (0–3).
-    private static func styleGlass(_ glass: NSGlassEffectView) {
-        let defaults = UserDefaults.standard
-        let tint = defaults.object(forKey: "GlassTint") as? Double ?? 0.3
-        let lensing = defaults.object(forKey: "GlassLensing") as? Int ?? 2
-        glass.style = .clear
-        glass.tintColor = NSColor(name: nil) { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? NSColor.black.withAlphaComponent(tint)
-                : NSColor.white.withAlphaComponent(tint)
+    /// Applies the Settings window's values (see `Appearance`). Defaults: clear glass with a light
+    /// smoke tint so it stays visible over white pages, plus stronger lensing.
+    private static func styleGlass(_ glass: NSGlassEffectView, cornerRadius: CGFloat) {
+        let variant = Appearance.variant
+        glass.style = variant == 0 ? .regular : .clear
+        glass.tintColor = Appearance.tint
+        // Private AppKit knobs: more glass variants, and stronger lensing that bends and mirrors
+        // what's behind the glass. Guarded so a macOS without them falls back to public styles.
+        if glass.responds(to: NSSelectorFromString("set_variant:")) {
+            glass.setValue(variant, forKey: "_variant")
         }
-        // Private AppKit knob: stronger lensing bends and mirrors what's behind the glass.
-        // Guarded so a macOS without it simply falls back to standard clear glass.
         if glass.responds(to: NSSelectorFromString("set_contentLensing:")) {
-            glass.setValue(lensing, forKey: "_contentLensing")
+            glass.setValue(Appearance.lensing, forKey: "_contentLensing")
         }
+        glass.cornerRadius = cornerRadius
+        // A glass view in a window that isn't key doesn't redraw a new radius until it's
+        // re-shown, so flip it hidden and back (a no-op for a view that is hidden anyway).
+        let wasHidden = glass.isHidden
+        glass.isHidden = true
+        glass.isHidden = wasHidden
     }
 
     private let index: AppIndex
@@ -141,6 +160,8 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     private var suppressCompletion = false
     private var anchorTop: CGFloat = 0
     private var anchorMidX: CGFloat = 0
+    private var resultLimit = Metric.maxRows
+    private static let previewRows = 3
 
     init(index: AppIndex, usage: Usage) {
         self.index = index
@@ -172,27 +193,20 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         container.contentView = root
         panel.contentView = container
 
-        Self.styleGlass(bar)
-        bar.cornerRadius = Metric.barHeight / 2
         let barContent = FlippedView()
         bar.contentView = barContent
 
         leadingIcon.imageScaling = .scaleProportionallyUpOrDown
-        leadingIcon.contentTintColor = .secondaryLabelColor
         leadingIcon.image = searchSymbol
 
-        let font = NSFont.systemFont(ofSize: 24, weight: .regular)
-        field.font = font
+        field.font = Self.fieldFont
         field.isBordered = false
         field.isBezeled = false
         field.drawsBackground = false
         field.focusRingType = .none
-        field.textColor = .labelColor
         field.usesSingleLineMode = true
         field.cell?.isScrollable = true
         field.cell?.wraps = false
-        field.placeholderAttributedString = NSAttributedString(
-            string: "Open App", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor])
         field.delegate = self
         let fieldHeight = ceil(field.cell?.cellSize.height ?? 30)
         barContent.frame = NSRect(x: 0, y: 0, width: Metric.width, height: Metric.barHeight)
@@ -202,8 +216,6 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         barContent.addSubview(leadingIcon)
         barContent.addSubview(field)
 
-        Self.styleGlass(list)
-        list.cornerRadius = 22
         let listContent = FlippedView()
         list.contentView = listContent
         rows = (0..<Metric.maxRows).map { i in
@@ -216,6 +228,22 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
 
         root.addSubview(bar)
         root.addSubview(list)
+        applyAppearance()
+    }
+
+    private static let fieldFont = NSFont.systemFont(ofSize: 24, weight: .regular)
+
+    /// Re-reads `Appearance`; the Settings window calls this on every change.
+    func applyAppearance() {
+        let radius = CGFloat(Appearance.cornerRadius)
+        Self.styleGlass(bar, cornerRadius: radius)
+        Self.styleGlass(list, cornerRadius: radius * 22 / CGFloat(Appearance.maxCornerRadius))
+        leadingIcon.contentTintColor = Appearance.secondaryText
+        field.textColor = Appearance.text
+        (field.currentEditor() as? NSTextView)?.textColor = Appearance.text
+        field.placeholderAttributedString = NSAttributedString(
+            string: "Open App", attributes: [.font: Self.fieldFont, .foregroundColor: Appearance.tertiaryText])
+        rows.forEach { $0.applyAppearance() }
     }
 
     /// Have the window server build the backing store once so the first real show is instant.
@@ -233,15 +261,15 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
 
     var isVisible: Bool { panel.isVisible }
 
+    /// While Settings is open the panel is a fixed preview: nothing hides or replaces it.
+    private var isPreviewing = false
+
     func toggle() { panel.isVisible ? hide() : show() }
 
     func show() {
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens[0]
-        let frame = screen.visibleFrame
-        anchorMidX = frame.midX
-        anchorTop = frame.maxY - frame.height * 0.2
-
+        guard !isPreviewing else { return }
+        anchorToMouseScreen()
+        resultLimit = Metric.maxRows
         typed = ""
         field.stringValue = ""
         results = []
@@ -253,14 +281,57 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
         panel.makeFirstResponder(field)
         if let editor = field.currentEditor() as? NSTextView {
             editor.selectedTextAttributes = [
-                .backgroundColor: NSColor.labelColor.withAlphaComponent(0.10),
-                .foregroundColor: NSColor.secondaryLabelColor,
+                .backgroundColor: Appearance.text.withAlphaComponent(0.10),
+                .foregroundColor: Appearance.secondaryText,
             ]
             editor.insertionPointColor = .controlAccentColor
         }
     }
 
+    /// Sample shown while the Settings window is open. Clicks only drag it around (handy for judging
+    /// the glass over different backgrounds), and it stays up until `endPreview()`. Returns its frame.
+    func showPreview() -> NSRect {
+        isPreviewing = true
+        panel.isMovable = true
+        panel.dragsOnMouseDown = true
+        anchorToMouseScreen()
+        resultLimit = Self.previewRows
+        typed = "Safari"
+        field.stringValue = typed
+        results = Ranker.search(typed, in: index.apps, usage: usage, limit: resultLimit)
+        selected = 0
+        updateRows()
+        layoutPanel()
+        panel.orderFrontRegardless()
+        panel.makeFirstResponder(nil) // ordering front re-attaches the field editor; show plain text
+        // Until the app index has loaded, reserve room for the most rows the preview can grow to.
+        return panelFrame(rows: index.apps.isEmpty ? Self.previewRows : results.count)
+    }
+
+    func endPreview() {
+        isPreviewing = false
+        panel.dragsOnMouseDown = false
+        panel.isMovable = false
+        hide()
+    }
+
+    /// Keep a dragged preview where it was put when results refresh.
+    func windowDidMove(_ notification: Notification) {
+        guard isPreviewing else { return }
+        anchorMidX = panel.frame.midX
+        anchorTop = panel.frame.maxY - Metric.margin
+    }
+
+    private func anchorToMouseScreen() {
+        let mouse = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main ?? NSScreen.screens[0]
+        let frame = screen.visibleFrame
+        anchorMidX = frame.midX
+        anchorTop = frame.maxY - frame.height * 0.2
+    }
+
     func hide() {
+        guard !isPreviewing else { return }
         panel.orderOut(nil)
     }
 
@@ -274,13 +345,22 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
 
     // MARK: Layout
 
+    private func listHeight(rows: Int) -> CGFloat {
+        rows == 0 ? 0 : CGFloat(rows) * Metric.rowHeight + 2 * Metric.inset
+    }
+
+    private func panelFrame(rows: Int) -> NSRect {
+        let m = Metric.margin, w = Metric.width
+        let contentHeight = Metric.barHeight + (rows == 0 ? 0 : Metric.gap + listHeight(rows: rows))
+        return NSRect(x: anchorMidX - w / 2 - m, y: anchorTop - contentHeight - m,
+                      width: w + 2 * m, height: contentHeight + 2 * m)
+    }
+
     private func layoutPanel() {
         let m = Metric.margin, w = Metric.width
         let count = results.count
-        let listHeight = count == 0 ? 0 : CGFloat(count) * Metric.rowHeight + 2 * Metric.inset
-        let contentHeight = Metric.barHeight + (count == 0 ? 0 : Metric.gap + listHeight)
-        let frame = NSRect(x: anchorMidX - w / 2 - m, y: anchorTop - contentHeight - m,
-                           width: w + 2 * m, height: contentHeight + 2 * m)
+        let listHeight = listHeight(rows: count)
+        let frame = panelFrame(rows: count)
         panel.setFrame(frame, display: false)
         root.frame = NSRect(origin: .zero, size: frame.size)
         bar.frame = NSRect(x: m, y: m, width: w, height: Metric.barHeight)
@@ -321,7 +401,7 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     }
 
     private func refresh(complete: Bool) {
-        results = Ranker.search(typed, in: index.apps, usage: usage, limit: Metric.maxRows)
+        results = Ranker.search(typed, in: index.apps, usage: usage, limit: resultLimit)
         selected = 0
         updateRows()
         layoutPanel()
@@ -396,7 +476,7 @@ final class SearchController: NSObject, NSTextFieldDelegate, NSWindowDelegate {
     // MARK: Launching
 
     private func launch(at i: Int) {
-        guard results.indices.contains(i) else { return }
+        guard !isPreviewing, results.indices.contains(i) else { return }
         let app = results[i]
         usage.record(query: Ranker.normalize(typed), id: app.id)
         hide()

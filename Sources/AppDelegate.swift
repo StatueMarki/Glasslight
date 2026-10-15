@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         .appendingPathComponent("Glasslight/usage.json"))
     private var search: SearchController!
     private var hotKey: HotKey!
+    private var settings: SettingsWindowController!
     private var statusItem: NSStatusItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -16,15 +17,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         index.start()
         hotKey = HotKey { [weak self] in self?.search.toggle() }
         hotKey.start()
+        settings = SettingsWindowController(
+            onChange: { [weak self] in self?.search.applyAppearance() },
+            showPreview: { [weak self] in self?.search.showPreview() },
+            hidePreview: { [weak self] in self?.search.endPreview() })
         setUpStatusItem()
         if CommandLine.arguments.contains("--show") {
             DispatchQueue.main.async { self.search.show() }
+        }
+        if CommandLine.arguments.contains("--settings") {
+            DispatchQueue.main.async { self.settings.show() }
         }
     }
 
     /// Opening the app again (Finder, `open -a Glasslight`) shows the search bar.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        search.show()
+        if settings.isOpen { settings.show() } else { search.show() }
         return false
     }
 
@@ -47,6 +55,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                          keyEquivalent: "").target = self
         }
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: "").target = self
         let login = NSMenuItem(title: "Launch at Login", action: #selector(toggleLaunchAtLogin), keyEquivalent: "")
         login.target = self
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
@@ -58,6 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openPanel() {
         DispatchQueue.main.async { self.search.show() }
+    }
+
+    @objc private func openSettings() {
+        DispatchQueue.main.async { self.settings.show() }
     }
 
     @objc private func enableShortcut() {

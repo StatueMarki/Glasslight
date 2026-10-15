@@ -32,16 +32,3 @@ Lensing uses a private AppKit property. If a future macOS removes it, Glasslight
 Ones you launch Glasslight, it will appear as a simple magnifying glass/zoom icon in your menu bar. From there you can quit Glasslight and toggle the option to launch the program on startup. This feature is off by default as I think it is very annoying when programs assume you want all the features it can offer and sneak themselves into background activities and "launch on startup" without asking.
 
 You can open and close Glasslight by simply double tapping the right command key ⌘. After that, it is just like using the normal Spotlight search: Type in what program you want to launch, press Enter, when your program is being suggested or use the up and down arrow keys to go down the list of available applications (you will probably never do that)
-
-
-
-
-
-
-## Build
-
-```bash
-./build.sh            # → build/Glasslight.app
-./build.sh install    # → ~/Applications/Glasslight.app, then launches it
-./build.sh test       # ranking + shortcut tests
-```
