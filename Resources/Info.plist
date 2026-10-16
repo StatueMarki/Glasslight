@@ -6,6 +6,8 @@
 	<string>en</string>
 	<key>CFBundleExecutable</key>
 	<string>Glasslight</string>
+	<key>CFBundleIconFile</key>
+	<string>Glasslight</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.glasslight</string>
 	<key>CFBundleName</key>

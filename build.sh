@@ -19,8 +19,9 @@ fi
 
 APP=build/Glasslight.app
 rm -rf "$APP"
-mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+iconutil -c icns Glasslight.iconset -o "$APP/Contents/Resources/Glasslight.icns"
 swiftc "${FLAGS[@]}" Sources/*.swift -o "$APP/Contents/MacOS/Glasslight"
 # A stable identity keeps the Input Monitoring grant across rebuilds (ad-hoc signatures change
 # with every build). Uses the local self-signed "Glasslight Local Signing" identity if present.
